@@ -1,0 +1,20 @@
+# Dependencies and build output
+node_modules
+.next
+.next-prod
+.next-preview
+.next-verify
+out
+*.tsbuildinfo
+
+# Secrets and local data — never commit
+# .env.local holds the Zernio API key; .data holds panel users (password hashes) and the session secret.
+.env*
+!.env.example
+.data
+.data-preview
+*.tmp
+
+# Local tooling
+.claude
+*.log
