@@ -10,7 +10,8 @@ A local, Persian-language social media workspace powered by Zernio. The Zernio A
 - **Publishing:** prepare posts for one or more connected accounts, upload photos/videos through Zernio's presigned media flow, publish now, or schedule with the Asia/Tehran timezone. Includes feed, Reel, and Story targets where the selected platform supports them.
 - **Inbox:** view conversations and messages, reply to DMs, review comments, and reply to comments.
 - **Analytics:** review account totals, daily engagement, follower counts, and top posts over a selected date range.
-- **Automations:** create, pause, resume, and remove Instagram comment-to-DM and story-reply automations.
+- **Automations:** create, pause, resume, and remove Instagram comment-to-DM and story-reply automations. Comment-triggered rules like matched comments when the platform and account permissions allow it.
+- **Comment recovery:** on server startup, scan new comments and comment-thread replies since the last successful check and send matching active rules' DM and public reply when configured, while skipping comments already publicly replied to and checking automation logs to avoid duplicate DMs.
 - **OAuth return:** show connection success/failure and confirm the returned account appears in the selected Zernio profile.
 
 What appears and works depends on the Zernio plan, enabled API scopes, connected platform, and the platform's account eligibility. Meta features generally require a Business or Creator Instagram account. Analytics and inbox data may be unavailable until enabled for the Zernio profile.

@@ -46,7 +46,7 @@ function draftFromRule(rule: AutomationRule): Draft {
 }
 
 /** Fields sent to Zernio for both create (POST) and update (PATCH). */
-function payloadFromDraft(draft: Draft) {
+function payloadFromDraft(draft: Draft, actions?: AutomationRule["actions"]) {
   const cooldown = Math.min(8760, Math.max(1, Math.round(Number(draft.cooldownHours) || 24)));
   return {
     name: draft.name.trim(),
@@ -55,7 +55,11 @@ function payloadFromDraft(draft: Draft) {
     matchMode: draft.matchMode,
     dmMessage: draft.dmMessage.trim(),
     repeatPolicy: draft.repeatMode === "once" ? { mode: "once" } : { mode: "every_comment", cooldownHours: cooldown },
-    ...(draft.trigger === "comment" ? { commentReply: draft.commentReply.trim(), publicReplyPolicy: draft.replyAlways && draft.commentReply.trim() ? "always" : "after_dm" } : {}),
+    ...(draft.trigger === "comment" ? {
+      commentReply: draft.commentReply.trim(),
+      publicReplyPolicy: draft.replyAlways && draft.commentReply.trim() ? "always" : "after_dm",
+      actions: { ...actions, likeComment: true },
+    } : {}),
   };
 }
 
@@ -185,16 +189,17 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
     event.preventDefault();
     const problem = validateDraft(draft);
     if (problem) return setNotice({ kind: "error", text: problem });
-    const payload = payloadFromDraft(draft);
     if (editingId) {
       const rule = items.find((item) => ruleId(item) === editingId);
       if (!rule) return;
+      const payload = payloadFromDraft(draft, rule.actions);
       // Only send trigger when it changes: Zernio detaches the post binding on a trigger change.
       const triggerChanged = draft.trigger !== (rule.trigger || "comment");
       const body = { ...payload, ...(triggerChanged ? { trigger: draft.trigger } : {}), ...bindingForPatch(draft, rule, triggerChanged) };
       if (await patchRule(rule, body, `قانون «${payload.name}» ذخیره شد.`)) { setEditingId(null); setDraft(emptyDraft); }
       return;
     }
+    const payload = payloadFromDraft(draft);
     setSaving(true);
     setNotice(null);
     try {
@@ -407,4 +412,3 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
     </section>
   </div>;
 }
-

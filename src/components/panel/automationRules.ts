@@ -18,6 +18,7 @@ export type AutomationRule = {
   matchMode?: MatchMode;
   dmMessage?: string;
   commentReply?: string;
+  actions?: { likeComment?: boolean; hideComment?: boolean };
   isActive?: boolean;
   repeatPolicy?: RepeatPolicy;
   publicReplyPolicy?: "after_dm" | "always";
