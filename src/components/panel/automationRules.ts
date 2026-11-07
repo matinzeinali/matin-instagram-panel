@@ -10,6 +10,7 @@ export type AutomationRule = {
   id?: string;
   _id?: string;
   name?: string;
+  createdAt?: string;
   accountId?: string;
   platform?: string;
   trigger?: string;
@@ -18,13 +19,24 @@ export type AutomationRule = {
   matchMode?: MatchMode;
   dmMessage?: string;
   commentReply?: string;
+  commentReplyVariations?: string[];
+  dmMessageVariations?: string[];
+  buttons?: Array<{ type?: string; title?: string; url?: string }>;
+  dmDelaySeconds?: number;
+  typoTolerance?: boolean;
   actions?: { likeComment?: boolean; hideComment?: boolean };
   isActive?: boolean;
   repeatPolicy?: RepeatPolicy;
   publicReplyPolicy?: "after_dm" | "always";
+  audience?: { followerStatus?: "any" | "follower" | "non_follower"; whenUnknown?: "send" | "skip" | "verify"; tapToUnlock?: boolean };
+  followGate?: { message?: string; buttonLabel?: string; notFollowingMessage?: string };
   platformPostId?: string;
   postTitle?: string;
-  stats?: { triggered?: number; dmsSent?: number; dmsFailed?: number; uniqueContacts?: number };
+  stats?: {
+    triggered?: number; dmsSent?: number; dmsFailed?: number; uniqueContacts?: number;
+    trackedSends?: number; linkClicks?: number; uniqueClicks?: number; read?: number;
+    followGateSent?: number; followGatePassed?: number; followGateFailed?: number;
+  };
 };
 
 const ARABIC_TO_PERSIAN: Record<string, string> = { "ي": "ی", "ى": "ی", "ك": "ک", "ة": "ه", "ۀ": "ه", "أ": "ا", "إ": "ا", "ٱ": "ا" };
@@ -75,8 +87,11 @@ export function keywordVariants(keyword: string) {
     base.replace(/‌/g, " "), // half-space typed as a normal space
     base.replace(/‌/g, ""), // half-space dropped
     persian.replace(/[0-9]/g, (digit) => PERSIAN_DIGITS[Number(digit)]),
+    // Zernio compares raw text, so cover the usual Latin casings (hermes / HERMES / Hermes / Prompt Master).
+    base.toLocaleLowerCase("en-US"),
     base.toLocaleUpperCase("en-US"),
     base.charAt(0).toLocaleUpperCase("en-US") + base.slice(1).toLocaleLowerCase("en-US"),
+    base.toLocaleLowerCase("en-US").replace(/(^|\s)(\S)/g, (_match, space: string, letter: string) => space + letter.toLocaleUpperCase("en-US")),
   ]);
   return [...variants].map((item) => item.trim()).filter(Boolean);
 }

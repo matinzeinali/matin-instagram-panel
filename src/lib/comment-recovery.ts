@@ -302,6 +302,9 @@ async function recoverAccount(
       }
       const rule = matchingRules[0];
       if (!rule || (!rule.commentReply?.trim() && !rule.dmMessage?.trim())) continue;
+      // A rule with a follow gate (or tap-to-unlock) must go through Zernio's own flow: a plain private reply from here
+      // would hand the message to non-followers and drop the confirm button, link buttons and delay.
+      if ((rule.audience?.followerStatus && rule.audience.followerStatus !== "any") || rule.audience?.tapToUnlock) continue;
 
       const previousDm = (logsByRule.get(getId(rule)) || []).find((log) =>
         log.commentId === commentId && log.source !== "dm",
@@ -336,7 +339,9 @@ async function recoverAccount(
         continue;
       }
 
-      const publicReply = rule.commentReply?.trim();
+      // Rotate between the main reply and its variations, like Zernio does for live comments.
+      const replyChoices = [rule.commentReply, ...(rule.commentReplyVariations || [])].map((text) => text?.trim()).filter((text): text is string => Boolean(text));
+      const publicReply = replyChoices[Math.floor(Math.random() * replyChoices.length)];
       const replyBody = JSON.stringify({
         accountId,
         commentId,
