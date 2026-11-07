@@ -58,6 +58,9 @@ const dataDirectory = path.resolve(process.cwd(), process.env.AUTH_DATA_DIR?.tri
 const statePath = path.join(dataDirectory, "comment-recovery.json");
 
 let recoveryPromise: Promise<void> | undefined;
+// Instagram comment likes are refused (403 PLATFORM_BETA_RESTRICTED) until Meta approves Zernio's permission;
+// after the first refusal, stop asking for the rest of this run.
+let likesUnavailable = false;
 
 function getArray<T>(body: PagedResponse<T> | T[], ...keys: Array<keyof PagedResponse<T>>) {
   if (Array.isArray(body)) return body;
@@ -106,6 +109,39 @@ async function writeState(state: RecoveryState) {
   await rename(temporaryPath, statePath);
 }
 
+// The scan shares Zernio's rate limit with the panel itself, so it runs slowly in the background:
+// requests are spaced out, and a 429 or a dropped connection is waited out and retried in place
+// instead of abandoning the whole scan (which used to restart the same burst every minute).
+const MIN_REQUEST_GAP_MS = 1_500;
+const MAX_ATTEMPTS = 6;
+let nextRequestAt = 0;
+
+const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForTurn() {
+  const now = Date.now();
+  const startAt = Math.max(now, nextRequestAt);
+  nextRequestAt = startAt + MIN_REQUEST_GAP_MS;
+  if (startAt > now) await sleep(startAt - now);
+}
+
+/** Seconds Zernio asks us to wait: the Retry-After header, else "retry after N seconds" in the body. */
+function retryAfterSeconds(response: Response, text: string) {
+  const header = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(header) && header > 0) return header;
+  const fromBody = Number(text.match(/retry after (\d+) seconds?/i)?.[1]);
+  return Number.isFinite(fromBody) && fromBody > 0 ? fromBody : 30;
+}
+
+/** When the quota is nearly used up, hold back until the window resets so the panel keeps some headroom. */
+function pauseForQuota(response: Response) {
+  const remaining = Number(response.headers.get("x-ratelimit-remaining"));
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (!Number.isFinite(remaining) || remaining > 3 || !Number.isFinite(reset)) return;
+  const resetAtMs = reset > 1e12 ? reset : reset > 1e9 ? reset * 1000 : Date.now() + reset * 1000;
+  nextRequestAt = Math.max(nextRequestAt, Math.min(resetAtMs, Date.now() + 120_000));
+}
+
 async function zernioRequest<T>(endpoint: string, apiKey: string, baseUrl: string, init?: RequestInit): Promise<T> {
   const url = new URL(`${baseUrl.replace(/\/$/, "")}${endpoint}`);
   const headers = new Headers(init?.headers);
@@ -113,19 +149,40 @@ async function zernioRequest<T>(endpoint: string, apiKey: string, baseUrl: strin
   headers.set("Accept", "application/json");
   if (init?.body) headers.set("Content-Type", "application/json");
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      ...init,
-      headers,
-      cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (error) {
-    console.error("[comment-recovery] درخواست به Zernio با خطای ارتباطی متوقف شد.", error);
-    throw new RecoveryError("ارتباط با Zernio برقرار نشد.", true);
+  let response: Response | undefined;
+  let text = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    await waitForTurn();
+    try {
+      response = await fetch(url, {
+        ...init,
+        headers,
+        cache: "no-store",
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch (error) {
+      if (attempt === MAX_ATTEMPTS) {
+        console.warn(`[comment-recovery] ارتباط با Zernio برقرار نشد (${(error as Error).message}).`);
+        throw new RecoveryError("ارتباط با Zernio برقرار نشد.", true);
+      }
+      await sleep(Math.min(60_000, 2_000 * 2 ** attempt));
+      continue;
+    }
+    text = await response.text();
+    pauseForQuota(response);
+    if (response.status === 429 && attempt < MAX_ATTEMPTS) {
+      const seconds = retryAfterSeconds(response, text);
+      console.info(`[comment-recovery] به سقف درخواست Zernio رسیدیم؛ ${seconds} ثانیه صبر و بعد ادامه.`);
+      nextRequestAt = Math.max(nextRequestAt, Date.now() + (seconds + 1) * 1000);
+      continue;
+    }
+    if (response.status >= 500 && attempt < MAX_ATTEMPTS) {
+      await sleep(Math.min(60_000, 2_000 * 2 ** attempt));
+      continue;
+    }
+    break;
   }
-  const text = await response.text();
+  if (!response) throw new RecoveryError("ارتباط با Zernio برقرار نشد.", true);
   let body: unknown = {};
   if (text) {
     try {
@@ -248,10 +305,14 @@ async function recoverAccount(
     Boolean(rule.commentReply?.trim() || rule.dmMessage?.trim()),
   );
   if (!commentRules.length) return { replies: 0, dms: 0 };
+  // Logs are only needed for a comment that actually matched a rule, so fetch them lazily (once per rule).
+  // Most scans find nothing to recover and then make no log requests at all.
   const logsByRule = new Map<string, AutomationLog[]>();
-  for (const rule of commentRules.filter((candidate) => candidate.dmMessage?.trim())) {
-    logsByRule.set(getId(rule), await getAutomationLogs(rule, apiKey, baseUrl));
-  }
+  const logsFor = async (rule: AutomationRule) => {
+    const id = getId(rule);
+    if (!logsByRule.has(id)) logsByRule.set(id, await getAutomationLogs(rule, apiKey, baseUrl));
+    return logsByRule.get(id) || [];
+  };
 
   const postsQuery = new URLSearchParams({
     accountId,
@@ -306,7 +367,7 @@ async function recoverAccount(
       // would hand the message to non-followers and drop the confirm button, link buttons and delay.
       if ((rule.audience?.followerStatus && rule.audience.followerStatus !== "any") || rule.audience?.tapToUnlock) continue;
 
-      const previousDm = (logsByRule.get(getId(rule)) || []).find((log) =>
+      const previousDm = (rule.dmMessage?.trim() ? await logsFor(rule) : []).find((log) =>
         log.commentId === commentId && log.source !== "dm",
       );
       let dmSucceeded = previousDm?.status === "sent";
@@ -327,7 +388,7 @@ async function recoverAccount(
           dmsSent += 1;
         } catch (error) {
           if (!(error instanceof RecoveryError) || error.retryable) throw error;
-          console.error(`[comment-recovery] دایرکت کامنت ${commentId} در حساب ${accountId} ارسال نشد.`, error);
+          console.warn(`[comment-recovery] دایرکت کامنت ${commentId} در حساب ${accountId} ارسال نشد (${error.message}).`);
         }
       } else if (rule.dmMessage?.trim() && dmAlreadyHandled && !dmSucceeded) {
         console.warn(`[comment-recovery] برای کامنت ${commentId} قبلاً دایرکت ثبت شده یا محدودیت قانون اعمال شده؛ ارسال دوباره انجام نمی‌شود.`);
@@ -354,20 +415,28 @@ async function recoverAccount(
           baseUrl,
           { method: "POST", body: replyBody },
         );
-        try {
-          await zernioRequest(
-            `/inbox/comments/${encodeURIComponent(postId)}/${encodeURIComponent(commentId)}/like`,
-            apiKey,
-            baseUrl,
-            { method: "POST", body: JSON.stringify({ accountId }) },
-          );
-        } catch (error) {
-          console.error(`[comment-recovery] پاسخ کامنت ${commentId} رفت، اما لایک آن در حساب ${accountId} انجام نشد.`, error);
+        if (!likesUnavailable) {
+          try {
+            await zernioRequest(
+              `/inbox/comments/${encodeURIComponent(postId)}/${encodeURIComponent(commentId)}/like`,
+              apiKey,
+              baseUrl,
+              { method: "POST", body: JSON.stringify({ accountId }) },
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/limited release|instagram_manage_engagement|beta/i.test(message)) {
+              likesUnavailable = true;
+              console.info("[comment-recovery] لایک کامنت در اینستاگرام فعلاً مجاز نیست (محدودیت متا)؛ در این بررسی دیگر امتحان نمی‌شود.");
+            } else {
+              console.warn(`[comment-recovery] پاسخ کامنت ${commentId} رفت، اما لایک آن انجام نشد (${message}).`);
+            }
+          }
         }
         repliesSent += 1;
       } catch (error) {
         if (!(error instanceof RecoveryError) || error.retryable) throw error;
-        console.error(`[comment-recovery] پاسخ عمومی کامنت ${commentId} در حساب ${accountId} ارسال نشد.`, error);
+        console.warn(`[comment-recovery] پاسخ عمومی کامنت ${commentId} در حساب ${accountId} ارسال نشد (${error.message}).`);
       }
     }
   }
@@ -478,7 +547,7 @@ async function runRecovery() {
         state.checkpoints[key] = scanStartedAt;
         await writeState(state);
       } catch (error) {
-        console.error(`[comment-recovery] بازیابی حساب ${accountId} ناموفق بود؛ بررسی بعدی از همان نقطه ادامه می‌یابد.`, error);
+        console.warn(`[comment-recovery] بازیابی حساب ${accountId} ناقص ماند (${error instanceof Error ? error.message : String(error)})؛ بررسی بعدی از همان نقطه ادامه می‌یابد.`);
         if (error instanceof RecoveryError && !error.retryable) {
           permanentlyFailedAccounts.push(accountId);
           continue;
@@ -488,7 +557,11 @@ async function runRecovery() {
     }
   }
 
-  console.info(`[comment-recovery] بررسی کامل شد؛ ${recoveredDms} دایرکت و ${recoveredReplies} پاسخ عمومی بازیابی شد.`);
+  if (!failedAccounts.length) {
+    console.info(`[comment-recovery] بررسی کامل شد؛ ${recoveredDms} دایرکت و ${recoveredReplies} پاسخ عمومی بازیابی شد.`);
+  } else if (recoveredDms || recoveredReplies) {
+    console.info(`[comment-recovery] تا اینجا ${recoveredDms} دایرکت و ${recoveredReplies} پاسخ عمومی بازیابی شد.`);
+  }
   if (permanentlyFailedAccounts.length) {
     console.error(`[comment-recovery] بررسی این حساب‌ها به خطای غیرقابل‌تلاش‌مجدد رسید: ${permanentlyFailedAccounts.join(", ")}`);
   }
@@ -497,17 +570,23 @@ async function runRecovery() {
   }
 }
 
-const retryDelay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+// Back off between whole-scan retries (1, 2, 5, 10, then every 15 minutes) instead of hammering every minute.
+const RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 600_000, 900_000];
 
 async function retryRecoveryUntilSuccess() {
-  while (true) {
+  for (let attempt = 0; ; attempt += 1) {
     try {
       await runRecovery();
       return;
     } catch (error) {
-      console.error("[comment-recovery] بررسی کامل نشد؛ یک دقیقهٔ دیگر دوباره تلاش می‌شود.", error);
-      if (error instanceof RecoveryError && !error.retryable) return;
-      await retryDelay(60_000);
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof RecoveryError && !error.retryable) {
+        console.error(`[comment-recovery] بررسی متوقف شد: ${message}`);
+        return;
+      }
+      const delay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+      console.warn(`[comment-recovery] بررسی کامل نشد (${message})؛ ${Math.round(delay / 60_000)} دقیقهٔ دیگر دوباره تلاش می‌شود.`);
+      await sleep(delay);
     }
   }
 }
