@@ -14,6 +14,7 @@ import {
 type AutomationLog = {
   id?: string; status?: string; commentText?: string | null; commenterName?: string | null; commenterUsername?: string | null;
   error?: string | null; commentReplyStatus?: string | null; commentReplyError?: string | null; privateReplyConsumed?: boolean | null; createdAt?: string;
+  likeSkipped?: string | null;
 };
 type Diagnostics = { logs?: AutomationLog[]; misses?: { total?: number; retentionDays?: number; samples?: Array<{ commentText?: string; commenterName?: string; excludedBy?: string; at?: string }> }; error?: string };
 
@@ -27,6 +28,8 @@ type Draft = {
 
 const FOLLOW_MESSAGE = "سلام! برای دریافت پیام، اول پیج ما را دنبال کن و بعد روی دکمهٔ زیر بزن 🙏";
 const FOLLOW_BUTTON = "فالو کردم ✅";
+// Second button on the follow-gate DM that opens the account profile, so following is one tap.
+const PROFILE_BUTTON = "باز کردن پیج 👤";
 const NOT_FOLLOWING_MESSAGE = "هنوز پیج را دنبال نکرده‌ای. اول فالو کن و دوباره روی دکمه بزن 🙂";
 const emptyDraft: Draft = { name: "", trigger: "comment", keywords: "", excludeKeywords: "", matchMode: "contains", dmMessage: "", commentReply: "", repeatMode: "every_comment", cooldownHours: "24", replyAlways: false, postMode: "any", platformPostId: "", postTitle: "", requireFollow: false, followMessage: FOLLOW_MESSAGE, followButton: FOLLOW_BUTTON, notFollowingMessage: NOT_FOLLOWING_MESSAGE, dmVariations: "", buttons: [], delayValue: "0", delayUnit: "m", typoTolerance: false };
 const DM_LIMIT = 1000;
@@ -88,7 +91,7 @@ function payloadFromDraft(draft: Draft, actions?: AutomationRule["actions"], can
     dmMessage: draft.dmMessage.trim(),
     // Follow gate: followers get the DM; non-followers (or unknown) get a "follow me" message with a confirm button, and the real DM is sent once they tap it and are verified.
     audience: canGate && draft.requireFollow ? { followerStatus: "follower", whenUnknown: "verify" } : { followerStatus: "any", whenUnknown: "send" },
-    ...(canGate && draft.requireFollow ? { followGate: { message: draft.followMessage.trim() || FOLLOW_MESSAGE, buttonLabel: draft.followButton.trim().slice(0, 20) || FOLLOW_BUTTON, notFollowingMessage: draft.notFollowingMessage.trim() || NOT_FOLLOWING_MESSAGE } } : {}),
+    ...(canGate && draft.requireFollow ? { followGate: { message: draft.followMessage.trim() || FOLLOW_MESSAGE, buttonLabel: draft.followButton.trim().slice(0, 20) || FOLLOW_BUTTON, notFollowingMessage: draft.notFollowingMessage.trim() || NOT_FOLLOWING_MESSAGE, profileButtonLabel: PROFILE_BUTTON } } : {}),
     dmMessageVariations: splitLines(draft.dmVariations, MAX_DM_VARIATIONS),
     buttons: draft.buttons.map((button) => ({ type: "url", title: button.title.trim(), url: button.url.trim() })),
     dmDelaySeconds: delaySeconds(draft),
@@ -98,7 +101,9 @@ function payloadFromDraft(draft: Draft, actions?: AutomationRule["actions"], can
       // One reply per line: the first is the main reply, the rest are variations Zernio rotates at random.
       commentReply: replies[0] || "",
       commentReplyVariations: replies.slice(1),
-      publicReplyPolicy: draft.replyAlways && replies.length ? "always" : "after_dm",
+      // With the follow gate, the real DM waits for the tap, so "after_dm" would leave gated commenters with no public reply
+      // at all. The gate DM lands in their Message Requests folder; the public reply is what tells them to look there.
+      publicReplyPolicy: (draft.replyAlways || (canGate && draft.requireFollow)) && replies.length ? "always" : "after_dm",
       actions: { ...actions, likeComment: true },
     } : {}),
   };
@@ -393,6 +398,7 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
               const cells: Array<[string, string]> = [["فعال شد", fa(stats.triggered)], ["دایرکت رفت", fa(stats.dmsSent)], ["افراد یکتا", fa(stats.uniqueContacts)], ["کلیک لینک", fa(stats.uniqueClicks) + ctr], ["خوانده شد", fa(stats.read)], ["فالو تأییدشد", `${fa(stats.followGatePassed)} از ${fa(stats.followGateSent)}`]];
               return <>
                 <div className="rule-stats">{cells.map(([label, value]) => <div className="rule-stat" key={label}><strong>{value}</strong><span>{label}</span></div>)}</div>
+                {rule.audience?.followerStatus === "follower" && (stats.followGateSent || 0) > (stats.followGatePassed || 0) && <p className="warn-note">{fa((stats.followGateSent || 0) - (stats.followGatePassed || 0))} نفر پیام شرط فالو را گرفته‌اند ولی هنوز دکمه را نزده‌اند. این پیام برای غیرفالوورها در پوشهٔ <strong>Requests</strong> اینستاگرام‌شان است، نه دایرکت اصلی.{rule.publicReplyPolicy !== "always" && <> جواب عمومی این قانون فقط بعد از دایرکت اصلی می‌رود، پس این افراد راهنمایی‌ای زیر کامنت‌شان نمی‌بینند. <button className="link-button" disabled={busyId === id} onClick={() => void patchRule(rule, { publicReplyPolicy: "always" }, "از این به بعد جواب عمومی زیر هر کامنت منطبق گذاشته می‌شود.")}>جواب عمومی را همیشه بده</button></>}</p>}
                 {(rule.audience?.followerStatus === "follower" || Boolean(stats.dmsFailed)) && <p className="stat-line">{rule.audience?.followerStatus === "follower" ? "فقط فالوورها" : ""}{rule.audience?.followerStatus === "follower" && stats.dmsFailed ? " · " : ""}{stats.dmsFailed ? <span className="text-error">{fa(stats.dmsFailed)} ناموفق</span> : null}</p>}
               </>;
             })()}
@@ -492,7 +498,10 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
         {draft.trigger === "comment" && <div className="compose-label sub-card"><span>جواب عمومی زیر کامنت (اختیاری)</span>
           <ReplyInput label="جواب‌های عمومی" max={MAX_REPLIES} value={draft.commentReply} onChange={(value) => set("commentReply", value)} placeholder="یک جواب بنویس، مثلاً: دایرکتت رو چک کن 🌱" />
           <span className="field-hint">هر جواب را بنویس و «+ افزودن» (یا <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) بزن تا اضافه شود (تا {MAX_REPLIES.toLocaleString("fa-IR")} جواب). برای هر کامنت یکی به‌صورت تصادفی انتخاب می‌شود تا جواب‌ها شبیه هم نباشند.</span>
-          {splitReplies(draft.commentReply).length > 0 && <span className="check-row"><input type="checkbox" checked={draft.replyAlways} onChange={(event) => set("replyAlways", event.target.checked)} />حتی وقتی دایرکت نرفت (مثلاً قبلاً گرفته بود) هم جواب عمومی بده</span>}
+          {splitReplies(draft.commentReply).length > 0 && (isInstagram && draft.requireFollow
+            ? <span className="check-row"><input type="checkbox" checked disabled />جواب عمومی همیشه داده می‌شود (چون شرط فالو روشن است و پیامش به پوشهٔ Requests می‌رود)</span>
+            : <span className="check-row"><input type="checkbox" checked={draft.replyAlways} onChange={(event) => set("replyAlways", event.target.checked)} />حتی وقتی دایرکت نرفت (مثلاً قبلاً گرفته بود) هم جواب عمومی بده</span>)}
+          {isInstagram && <span className="field-hint">❤ لایک خودکار کامنت روشن است، ولی فعلاً در اینستاگرام انجام نمی‌شود: متا هنوز این اجازه را به Zernio نداده. هر وقت بدهد، بدون تغییر قانون خودکار شروع می‌شود.</span>}
         </div>}
 
         </section>
@@ -501,7 +510,8 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
         <div className="compose-field">
           <label className="check-row"><input type="checkbox" checked={draft.requireFollow} onChange={(event) => set("requireFollow", event.target.checked)} />اگر کاربر فالوور نیست، اول از او بخواه پیج را فالو کند</label>
           {draft.requireFollow ? <>
-            <span className="field-hint">فالوور: پیام اصلی مستقیم می‌رود. غیرفالوور: پیام زیر با دکمهٔ تأیید می‌رود و بعد از فالو و زدن دکمه، پیام اصلی (یا لینک) برایش ارسال می‌شود.</span>
+            <span className="field-hint">فالوور: پیام اصلی مستقیم می‌رود. غیرفالوور: پیام زیر با دکمهٔ تأیید و دکمهٔ «باز کردن پیج» می‌رود و بعد از فالو و زدن دکمه، پیام اصلی (یا لینک) برایش ارسال می‌شود.</span>
+            <p className="warn-note">⚠️ اینستاگرام پیام کسی را که فالوش نکرده‌اند در پوشهٔ <strong>«درخواست‌های پیام» (Requests)</strong> می‌گذارد، نه دایرکت اصلی‌شان، و معمولاً اعلانی هم نمی‌دهد. برای همین با روشن بودن این گزینه، جواب عمومی زیر کامنت <strong>همیشه</strong> گذاشته می‌شود؛ در جواب‌های عمومی بنویس «پوشهٔ Requests را چک کن».{!splitReplies(draft.commentReply).length && <> الان هیچ جواب عمومی‌ای نوشته نشده؛ حتماً یکی اضافه کن.</>}</p>
             <label className="compose-label">پیام درخواست فالو<textarea className="field" rows={3} maxLength={640} value={draft.followMessage} onChange={(event) => set("followMessage", event.target.value)} /></label>
             <label className="compose-label">متن دکمهٔ تأیید<input className="field" maxLength={20} value={draft.followButton} onChange={(event) => set("followButton", event.target.value)} /></label>
             <label className="compose-label">اگر دکمه را زد ولی هنوز فالو نکرده بود<textarea className="field" rows={2} maxLength={640} value={draft.notFollowingMessage} onChange={(event) => set("notFollowingMessage", event.target.value)} /></label>
@@ -556,6 +566,7 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
                   {log.error && <span className="log-detail">{explainError(log.error)}</span>}
                   {log.commentReplyStatus === "failed" && <span className="log-detail">پاسخ عمومی نرفت: {explainError(log.commentReplyError)}</span>}
                   {log.commentReplyStatus === "sent" && <span className="log-detail">پاسخ عمومی هم زیر کامنت رفت.</span>}
+                  {log.likeSkipped && <span className="log-detail">{explainError(log.likeSkipped)}</span>}
                 </span>
                 <time className="muted">{log.createdAt ? new Date(log.createdAt).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" }) : ""}</time>
               </li>)}</ul> : <p className="muted m-0">هنوز هیچ کامنتی این قانون را فعال نکرده.</p>}

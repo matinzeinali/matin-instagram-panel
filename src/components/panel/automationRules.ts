@@ -164,6 +164,8 @@ export const logStatusLabel = (status?: string) => STATUS_LABELS[status || ""] |
 export function explainError(error?: string | null) {
   if (!error) return "";
   const text = error.toLowerCase();
+  if (text.includes("instagram_manage_engagement") || text.includes("platform_beta_restricted") || (text.includes("liking") && text.includes("limited release")))
+    return "لایک نشد: متا هنوز اجازهٔ لایک خودکار کامنت در اینستاگرام را به Zernio نداده (فقط حساب‌های آزمایشی Zernio). از دست پنل کاری برنمی‌آید؛ تا آن موقع کامنت‌ها را در خود اینستاگرام لایک کن.";
   if (text.includes("already sent dm")) return "قبلاً به این نفر دایرکت داده شده و قانون روی «هر نفر فقط یک بار» است.";
   if (text.includes("cooldown")) return "این نفر به‌تازگی دایرکت گرفته و هنوز در فاصلهٔ استراحت قانون است.";
   if (text.includes("identical") || text.includes("dedupe")) return "همین متن به‌تازگی برای این نفر فرستاده شده بود.";
