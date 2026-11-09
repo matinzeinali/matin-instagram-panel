@@ -43,7 +43,7 @@ type PagedResponse<T> = {
   message?: string;
 };
 
-class RecoveryError extends Error {
+export class RecoveryError extends Error {
   constructor(message: string, readonly retryable = false) {
     super(message);
     this.name = "RecoveryError";
@@ -62,7 +62,7 @@ let recoveryPromise: Promise<void> | undefined;
 // after the first refusal, stop asking for the rest of this run.
 let likesUnavailable = false;
 
-function getArray<T>(body: PagedResponse<T> | T[], ...keys: Array<keyof PagedResponse<T>>) {
+export function getArray<T>(body: PagedResponse<T> | T[], ...keys: Array<keyof PagedResponse<T>>) {
   if (Array.isArray(body)) return body;
   for (const key of keys) {
     const value = body[key];
@@ -71,7 +71,7 @@ function getArray<T>(body: PagedResponse<T> | T[], ...keys: Array<keyof PagedRes
   return [];
 }
 
-function getId(value: { id?: unknown; _id?: unknown }) {
+export function getId(value: { id?: unknown; _id?: unknown }) {
   const id = typeof value._id === "string" ? value._id : value.id;
   return typeof id === "string" && id ? id : "";
 }
@@ -142,7 +142,7 @@ function pauseForQuota(response: Response) {
   nextRequestAt = Math.max(nextRequestAt, Math.min(resetAtMs, Date.now() + 120_000));
 }
 
-async function zernioRequest<T>(endpoint: string, apiKey: string, baseUrl: string, init?: RequestInit): Promise<T> {
+export async function zernioRequest<T>(endpoint: string, apiKey: string, baseUrl: string, init?: RequestInit): Promise<T> {
   const url = new URL(`${baseUrl.replace(/\/$/, "")}${endpoint}`);
   const headers = new Headers(init?.headers);
   headers.set("Authorization", `Bearer ${apiKey}`);

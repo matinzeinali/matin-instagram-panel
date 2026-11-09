@@ -23,19 +23,22 @@ type Draft = {
   dmMessage: string; commentReply: string; repeatMode: "once" | "every_comment"; cooldownHours: string; replyAlways: boolean;
   postMode: "any" | "one"; platformPostId: string; postTitle: string;
   requireFollow: boolean; followMessage: string; followButton: string; notFollowingMessage: string;
-  dmVariations: string; buttons: Array<{ title: string; url: string }>; delayValue: string; delayUnit: DelayUnit; typoTolerance: boolean;
+  dmVariations: string; buttons: Array<{ title: string; url: string }>; delayValue: string; delayUnit: DelayUnit; typoTolerance: boolean; alsoMatchInDms: boolean;
+  followupEnabled: boolean; followupDelay: string; followupReplies: string;
 };
 
+const FOLLOWUP_REPLY = "اگر پیام برات نیومد، همین کلمه رو توی دایرکت برام بفرست تا دوباره بفرستمش 🙏";
 const FOLLOW_MESSAGE = "سلام! برای دریافت پیام، اول پیج ما را دنبال کن و بعد روی دکمهٔ زیر بزن 🙏";
 const FOLLOW_BUTTON = "فالو کردم ✅";
 // Second button on the follow-gate DM that opens the account profile, so following is one tap.
 const PROFILE_BUTTON = "باز کردن پیج 👤";
 const NOT_FOLLOWING_MESSAGE = "هنوز پیج را دنبال نکرده‌ای. اول فالو کن و دوباره روی دکمه بزن 🙂";
-const emptyDraft: Draft = { name: "", trigger: "comment", keywords: "", excludeKeywords: "", matchMode: "contains", dmMessage: "", commentReply: "", repeatMode: "every_comment", cooldownHours: "24", replyAlways: false, postMode: "any", platformPostId: "", postTitle: "", requireFollow: false, followMessage: FOLLOW_MESSAGE, followButton: FOLLOW_BUTTON, notFollowingMessage: NOT_FOLLOWING_MESSAGE, dmVariations: "", buttons: [], delayValue: "0", delayUnit: "m", typoTolerance: false };
+const emptyDraft: Draft = { name: "", trigger: "comment", keywords: "", excludeKeywords: "", matchMode: "contains", dmMessage: "", commentReply: "", repeatMode: "every_comment", cooldownHours: "24", replyAlways: false, postMode: "any", platformPostId: "", postTitle: "", requireFollow: false, followMessage: FOLLOW_MESSAGE, followButton: FOLLOW_BUTTON, notFollowingMessage: NOT_FOLLOWING_MESSAGE, dmVariations: "", buttons: [], delayValue: "0", delayUnit: "m", typoTolerance: false, alsoMatchInDms: false, followupEnabled: false, followupDelay: "30", followupReplies: FOLLOWUP_REPLY };
 const DM_LIMIT = 1000;
 const DM_LIMIT_WITH_BUTTONS = 640; // Meta/Zernio limit when the DM carries buttons
 const MAX_DM_VARIATIONS = 5;
 const MAX_BUTTONS = 3;
+const MAX_FOLLOWUP_REPLIES = 5;
 const MAX_DELAY_SECONDS = 86400;
 type DelayUnit = "s" | "m" | "h";
 const DELAY_FACTOR: Record<DelayUnit, number> = { s: 1, m: 60, h: 3600 };
@@ -73,6 +76,8 @@ function draftFromRule(rule: AutomationRule): Draft {
     buttons: (rule.buttons || []).filter((button) => (button.type || "url") === "url").map((button) => ({ title: button.title || "", url: button.url || "" })),
     ...delayFromSeconds(rule.dmDelaySeconds),
     typoTolerance: Boolean(rule.typoTolerance),
+    alsoMatchInDms: Boolean(rule.alsoMatchInDms),
+    followupEnabled: false, followupDelay: "30", followupReplies: FOLLOWUP_REPLY, // replaced by the saved settings once they load
   };
 }
 
@@ -96,6 +101,8 @@ function payloadFromDraft(draft: Draft, actions?: AutomationRule["actions"], can
     buttons: draft.buttons.map((button) => ({ type: "url", title: button.title.trim(), url: button.url.trim() })),
     dmDelaySeconds: delaySeconds(draft),
     typoTolerance: draft.matchMode === "word" && draft.typoTolerance,
+    // Also fire on a plain DM containing the keyword (comment rules only; Zernio rejects it on story replies).
+    alsoMatchInDms: draft.trigger === "comment" && draft.alsoMatchInDms,
     repeatPolicy: draft.repeatMode === "once" ? { mode: "once" } : { mode: "every_comment", cooldownHours: cooldown },
     ...(draft.trigger === "comment" ? {
       // One reply per line: the first is the main reply, the rest are variations Zernio rotates at random.
@@ -250,6 +257,20 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
     }
   }
 
+  /** The second-reply settings live in the panel's own store (Zernio has no field for them). */
+  async function saveFollowup(id: string) {
+    if (!id) return;
+    const wanted = draft.requireFollow && draft.postMode === "one" && draft.followupEnabled;
+    const response = await fetch(`/api/followups/${encodeURIComponent(id)}?accountId=${encodeURIComponent(accountId)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: wanted, delayMinutes: Number(draft.followupDelay) || 30, replies: splitLines(draft.followupReplies, MAX_FOLLOWUP_REPLIES) }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(responseError(data, "جواب دوم ذخیره نشد؛ بقیهٔ قانون ذخیره شد."));
+    }
+  }
+
   async function saveDraft(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const problem = validateDraft(draft);
@@ -261,7 +282,8 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
       // Only send trigger when it changes: Zernio detaches the post binding on a trigger change.
       const triggerChanged = draft.trigger !== (rule.trigger || "comment");
       const body = { ...payload, ...(triggerChanged ? { trigger: draft.trigger } : {}), ...bindingForPatch(draft, rule, triggerChanged) };
-      if (await patchRule(rule, body, `قانون «${payload.name}» ذخیره شد.`)) { closeForm(); }
+      if (await patchRule(rule, body, `قانون «${payload.name}» ذخیره شد.`)) {
+        try { await saveFollowup(editingId); } catch (error) { setNotice({ kind: "error", text: error instanceof Error ? error.message : "جواب دوم ذخیره نشد." }); } closeForm(); }
       return;
     }
     const payload = payloadFromDraft(draft, undefined, isInstagram);
@@ -275,7 +297,11 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
       const data = await response.json().catch(() => ({}));
       if (response.status === 409) throw new Error("یک قانون روشن دیگر همین پست را دارد؛ هر پست فقط یک قانون مخصوص به خودش می‌تواند داشته باشد. آن قانون را ویرایش یا خاموش کن.");
       if (!response.ok) throw new Error(responseError(data, `ساخت قانون ناموفق بود (${response.status}).`));
+      const createdId = String(data?.automation?.id || data?.automation?._id || data?.id || data?._id || "");
+      let followupError = "";
+      try { await saveFollowup(createdId); } catch (error) { followupError = error instanceof Error ? error.message : "جواب دوم ذخیره نشد."; }
       closeForm();
+      if (followupError) { setNotice({ kind: "error", text: followupError }); await loadAutomations(); return; }
       setNotice({ kind: "ok", text: `قانون «${payload.name}» ساخته و روشن شد.` });
       await loadAutomations();
     } catch (error) {
@@ -328,6 +354,14 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
     setDraft(draftFromRule(rule));
     setNotice(null);
     setFormOpen(true);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/followups/${encodeURIComponent(ruleId(rule))}?accountId=${encodeURIComponent(accountId)}`, { cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        const saved = data?.setting;
+        if (response.ok && saved) setDraft((current) => ({ ...current, followupEnabled: Boolean(saved.enabled), followupDelay: String(saved.delayMinutes || 30), followupReplies: Array.isArray(saved.replies) && saved.replies.length ? saved.replies.join(REPLY_SEP) : FOLLOWUP_REPLY }));
+      } catch { /* defaults stay */ }
+    })();
   }
 
   function openNew() {
@@ -457,6 +491,10 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
         </div>
         {draftClashes.length > 0 && <p className="warn-note">«{draftClashes[0].keyword}» در قانون «{draftClashes[0].other}» هم هست؛ کسی که آن را کامنت کند دو دایرکت می‌گیرد.</p>}
 
+        {draft.trigger === "comment" && <div className="compose-field sub-card"><label className="check-row"><input type="checkbox" checked={draft.alsoMatchInDms} onChange={(event) => set("alsoMatchInDms", event.target.checked)} />جواب بده وقتی کسی همین کلمه را در دایرکت می‌نویسد</label>
+          <span className="field-hint">برای کسانی که فالوور نیستند مفید است: اگر خودشان دایرکت را شروع کنند، جواب در صندوق اصلی‌شان می‌آید، نه Requests. در جواب عمومی زیر کامنت بنویس «کلمهٔ ... را در دایرکت بفرست». همین کلمه‌ها و روش تطبیق برای دایرکت هم اعمال می‌شود.</span>
+        </div>}
+
         <div className="compose-options">
           <label className="compose-field">روش تطبیق
             <select className="field" value={draft.matchMode} onChange={(event) => set("matchMode", event.target.value as MatchMode)}>
@@ -517,6 +555,13 @@ export function AutomationPanel({ profileId, accounts }: { profileId: string; ac
             <label className="compose-label">اگر دکمه را زد ولی هنوز فالو نکرده بود<textarea className="field" rows={2} maxLength={640} value={draft.notFollowingMessage} onChange={(event) => set("notFollowingMessage", event.target.value)} /></label>
           </> : <span className="field-hint">خاموش: به همهٔ کامنت‌دهنده‌ها، فالوور باشند یا نه، دایرکت می‌رود.</span>}
         </div>
+        {draft.requireFollow && <div className="compose-field sub-card"><label className="check-row"><input type="checkbox" checked={draft.followupEnabled} disabled={draft.postMode !== "one"} onChange={(event) => set("followupEnabled", event.target.checked)} />اگر دکمه را نزد، چند دقیقه بعد یک جواب دوم زیر کامنتش بگذار</label>
+          <span className="field-hint">اینستاگرام اجازهٔ دایرکت دوم را نمی‌دهد، ولی جواب عمومی را همیشه می‌شود گذاشت. فقط برای کسانی که پیام «اول فالو کن» را گرفته‌اند و هنوز دکمه را نزده‌اند. {draft.postMode !== "one" ? "این گزینه فقط برای قانونی کار می‌کند که به یک پست مشخص وصل است." : "پنل باید روشن بماند تا این جواب‌ها گذاشته شوند (هر ۵ دقیقه بررسی می‌شود)."}</span>
+          {draft.followupEnabled && draft.postMode === "one" && <>
+            <label className="compose-label">چند دقیقه بعد؟<input className="field field-tiny" type="number" min={5} max={4320} value={draft.followupDelay} onChange={(event) => set("followupDelay", event.target.value)} /></label>
+            <ReplyInput label="جواب دوم" max={MAX_FOLLOWUP_REPLIES} value={draft.followupReplies} onChange={(value) => set("followupReplies", value)} placeholder="مثلاً: اگر پیام برات نیومد، همین کلمه رو توی دایرکت بفرست" />
+          </>}
+        </div>}
         </section>}
 
         <section className="form-step"><header className="step-head"><span className="step-num">{isInstagram ? "۵" : "۴"}</span><div><h3 className="step-title">تکرار و زمان‌بندی</h3><p className="step-desc">اگر کسی دوباره کامنت گذاشت و اینکه دایرکت چقدر بعد برود.</p></div></header>

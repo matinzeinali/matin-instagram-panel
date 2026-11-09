@@ -24,6 +24,7 @@ export type AutomationRule = {
   buttons?: Array<{ type?: string; title?: string; url?: string }>;
   dmDelaySeconds?: number;
   typoTolerance?: boolean;
+  alsoMatchInDms?: boolean;
   actions?: { likeComment?: boolean; hideComment?: boolean };
   isActive?: boolean;
   repeatPolicy?: RepeatPolicy;
@@ -167,6 +168,9 @@ export function explainError(error?: string | null) {
   if (text.includes("instagram_manage_engagement") || text.includes("platform_beta_restricted") || (text.includes("liking") && text.includes("limited release")))
     return "لایک نشد: متا هنوز اجازهٔ لایک خودکار کامنت در اینستاگرام را به Zernio نداده (فقط حساب‌های آزمایشی Zernio). از دست پنل کاری برنمی‌آید؛ تا آن موقع کامنت‌ها را در خود اینستاگرام لایک کن.";
   if (text.includes("already sent dm")) return "قبلاً به این نفر دایرکت داده شده و قانون روی «هر نفر فقط یک بار» است.";
+  if (text.includes("follow gate already pending")) return "درخواست فالوی قبلی این نفر هنوز باز است (دکمه را نزده)، برای همین پیام تازه‌ای نرفت. به او بگو پیام «اول فالو کن» را در دایرکت یا پوشهٔ Requests پیدا کند و دکمه را بزند.";
+  if (text.includes("follow gate: not following")) return "دکمهٔ تأیید را زد ولی هنوز پیج را فالو نکرده بود؛ پیام «هنوز فالو نکرده‌ای» برایش رفت و می‌تواند بعد از فالو دوباره دکمه را بزند.";
+  if (text.includes("not_follower")) return "فالوور نبود و پیام درخواست فالو برایش رفت.";
   if (text.includes("cooldown")) return "این نفر به‌تازگی دایرکت گرفته و هنوز در فاصلهٔ استراحت قانون است.";
   if (text.includes("identical") || text.includes("dedupe")) return "همین متن به‌تازگی برای این نفر فرستاده شده بود.";
   if (text.includes("does not exist") || text.includes("cannot be loaded")) return "کامنت پیدا نشد؛ احتمالاً حذف شده، یا جواب به کامنتِ یک کامنت بوده که اینستاگرام اجازهٔ پاسخ عمومی به آن را نمی‌دهد.";
