@@ -1,0 +1,17 @@
+services:
+  panel:
+    build: .
+    image: matin-instagram-panel
+    container_name: matin-instagram-panel
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    # Key and URLs come from .env.local (copy .env.example). The key never goes into the image.
+    env_file:
+      - .env.local
+    volumes:
+      # Panel users, session secret and second-reply settings survive rebuilds.
+      - panel-data:/app/.data
+
+volumes:
+  panel-data:

@@ -41,6 +41,25 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). Keep the server running while connecting accounts so the OAuth return can reach this machine.
 
+## Run with Docker
+
+The panel can run as a container, which is the easiest way to keep it always on (the comment recovery and the follow-up replies only work while it runs).
+
+```powershell
+copy .env.example .env.local   # then put your real ZERNIO_API_KEY in it
+docker compose up -d --build
+```
+
+Open [http://localhost:3000](http://localhost:3000). `restart: unless-stopped` brings it back after a reboot. The API key is read from `.env.local` at start and is never baked into the image. Panel logins, the session secret and the follow-up settings are kept in the `panel-data` volume, so they survive rebuilds.
+
+```powershell
+docker compose logs -f panel                                  # server log
+docker compose exec panel npm run reset-password -- <username> # forgot a password
+docker compose down                                           # stop (the volume stays)
+```
+
+If you serve it over https, set `APP_URL` to the https address so the login cookie is marked secure.
+
 ## Panel logins
 
 On the first visit, create the administrator login. There is no built-in default password. The administrator can then create separate user logins, choose one connected social account for each user, and reset passwords from **حساب کاربری**. The administrator can also change an existing user's assigned account; this closes that user's existing sessions. Regular users only see and operate the account assigned to them. Each user can change their own password there as well. User passwords are stored as salted scrypt hashes in the ignored `.data/users.json` file; the signing key is created in `.data/session-secret`. Back up `.data` securely if you need to preserve local logins across machine changes.
